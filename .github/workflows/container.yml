@@ -1,0 +1,81 @@
+name: Build and publish container
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive image name and tags
+        id: image
+        shell: bash
+        run: |
+          image_name="${GITHUB_REPOSITORY,,}"
+          tags="sha-${GITHUB_SHA::12}"
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            tags="latest ${tags}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            tags="${version} ${tags}"
+          fi
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build OCI image with Buildah
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ steps.image.outputs.name }}
+          tags: ${{ steps.image.outputs.tags }}
+          containerfiles: |
+            ./Containerfile
+          oci: true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=Jellyfin Home Manager
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish GitHub package
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add package details to summary
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          echo '### Published container package' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo "\`podman pull ${REGISTRY}/${{ steps.image.outputs.name }}:$(echo '${{ steps.image.outputs.tags }}' | cut -d' ' -f1)\`" >> "$GITHUB_STEP_SUMMARY"
