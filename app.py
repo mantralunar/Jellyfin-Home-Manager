@@ -105,18 +105,34 @@ class Jellyfin:
     def users(self) -> list[dict]:
         return self.request("GET", "/Users") or []
 
-    def libraries(self) -> list[dict]:
+    def libraries(self, users: list[dict] | None = None) -> list[dict]:
         folders = self.request("GET", "/Library/VirtualFolders") or []
         result = []
+        seen = set()
         for folder in folders:
             item_id = folder.get("ItemId")
             if item_id:
                 result.append({"id": item_id, "name": folder.get("Name") or item_id, "collectionType": folder.get("CollectionType") or ""})
+                seen.add(item_id)
+        # System-created views such as Playlists are not virtual folders. Discover
+        # them from user views and merge their real server IDs into the template.
+        for user in users if users is not None else self.users():
+            if (user.get("Policy") or {}).get("IsDisabled") or not user.get("Id"):
+                continue
+            for view in self.user_views(user["Id"]):
+                item_id = view.get("Id")
+                collection_type = str(view.get("CollectionType") or "").lower()
+                if item_id and item_id not in seen and collection_type == "playlists":
+                    result.append({"id": item_id, "name": view.get("Name") or "Playlists", "collectionType": "playlists"})
+                    seen.add(item_id)
         return result
 
-    def accessible_views(self, user_id: str) -> set[str]:
+    def user_views(self, user_id: str) -> list[dict]:
         payload = self.request("GET", f"/Users/{urllib.parse.quote(user_id)}/Views") or {}
-        return {x.get("Id") for x in payload.get("Items", []) if x.get("Id")}
+        return payload.get("Items", [])
+
+    def accessible_views(self, user_id: str) -> set[str]:
+        return {x.get("Id") for x in self.user_views(user_id) if x.get("Id")}
 
     def user(self, user_id: str) -> dict:
         return self.request("GET", f"/Users/{urllib.parse.quote(user_id)}") or {}
@@ -186,10 +202,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", ctype + "; charset=utf-8"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         jf = Jellyfin()
         if self.command == "GET" and self.path == "/api/state":
-            local = load_local(); users = jf.users(); libraries = jf.libraries()
+            local = load_local(); users = jf.users(); libraries = jf.libraries(users)
             return self.send_json(200, {**local, "users": [{"id": u["Id"], "name": u.get("Name", u["Id"]), "disabled": bool((u.get("Policy") or {}).get("IsDisabled"))} for u in users], "libraries": libraries})
         if self.command == "POST" and self.path == "/api/refresh":
-            local = load_local(); old = {x["id"]: x for x in local.get("master", {}).get("libraries", [])}; discovered = jf.libraries()
+            local = load_local(); old = {x["id"]: x for x in local.get("master", {}).get("libraries", [])}; discovered = jf.libraries(jf.users())
             ids = {x["id"] for x in discovered}; live = {x["id"]: x for x in discovered}; changes = {"new": [], "renamed": [], "removed": []}; merged = []
             # Retain the operator's saved order, update names in place, then append new libraries.
             for prev in local.get("master", {}).get("libraries", []):

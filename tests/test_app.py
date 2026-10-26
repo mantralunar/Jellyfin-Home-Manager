@@ -17,13 +17,16 @@ class FakeJellyfin(jhm.Jellyfin):
         "u1": {"Id": "u1", "Name": "Alice", "Policy": {}, "Configuration": {"OrderedViews": ["b", "a"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
         "u2": {"Id": "u2", "Name": "Bob", "Policy": {}, "Configuration": {"OrderedViews": ["b"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
         }
-        self.views_data = {"u1": ["a", "b"], "u2": ["b"]}
+        self.views_data = {
+            "u1": [{"Id": "a", "Name": "Films", "CollectionType": "movies"}, {"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "p", "Name": "Playlists", "CollectionType": "playlists"}],
+            "u2": [{"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "p", "Name": "Playlists", "CollectionType": "playlists"}],
+        }
 
     def request(self, method, path, body=None):
         if method == "GET" and path == "/Users": return list(self.users_data.values())
         if method == "GET" and path == "/Library/VirtualFolders": return [{"Name": "Films", "ItemId": "a", "CollectionType": "movies"}, {"Name": "Shows", "ItemId": "b", "CollectionType": "tvshows"}]
         parts = path.split("/")
-        if method == "GET" and len(parts) == 4 and parts[3] == "Views": return {"Items": [{"Id": x} for x in self.views_data[parts[2]]]}
+        if method == "GET" and len(parts) == 4 and parts[3] == "Views": return {"Items": self.views_data[parts[2]]}
         if method == "GET" and len(parts) == 3: return self.users_data[parts[2]]
         if method == "POST" and len(parts) == 4 and parts[3] == "Configuration":
             self.users_data[parts[2]]["Configuration"] = body
@@ -36,6 +39,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(FakeJellyfin().libraries(), [
             {"id": "a", "name": "Films", "collectionType": "movies"},
             {"id": "b", "name": "Shows", "collectionType": "tvshows"},
+            {"id": "p", "name": "Playlists", "collectionType": "playlists"},
         ])
 
     def test_current_jellyfin_authorization_header(self):
@@ -57,6 +61,11 @@ class Tests(unittest.TestCase):
         self.assertEqual(config["OrderedViews"], ["b"])
         self.assertEqual(config["MyMediaExcludes"], ["b"])
         self.assertEqual(config["LatestItemsExcludes"], [])
+
+    def test_automatic_playlists_view_is_deduplicated_across_users(self):
+        libraries = FakeJellyfin().libraries()
+        self.assertEqual([x["id"] for x in libraries].count("p"), 1)
+        self.assertEqual(next(x for x in libraries if x["id"] == "p")["name"], "Playlists")
 
     def test_update_and_read_back(self):
         jf = FakeJellyfin(); config = dict(jf.user("u1")["Configuration"]); config["OrderedViews"] = ["a", "b"]
