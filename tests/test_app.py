@@ -23,10 +23,13 @@ class FakeJellyfin(jhm.Jellyfin):
         }
 
     def request(self, method, path, body=None):
+        route, _, query = path.partition("?")
         if method == "GET" and path == "/Users": return list(self.users_data.values())
         if method == "GET" and path == "/Library/VirtualFolders": return [{"Name": "Films", "ItemId": "a", "CollectionType": "movies"}, {"Name": "Shows", "ItemId": "b", "CollectionType": "tvshows"}]
-        parts = path.split("/")
-        if method == "GET" and len(parts) == 4 and parts[3] == "Views": return {"Items": self.views_data[parts[2]]}
+        parts = route.split("/")
+        if method == "GET" and len(parts) == 4 and parts[3] == "Views":
+            if query != "includeHidden=true": raise AssertionError("User views must include hidden views")
+            return {"Items": self.views_data[parts[2]]}
         if method == "GET" and len(parts) == 3: return self.users_data[parts[2]]
         if method == "POST" and len(parts) == 4 and parts[3] == "Configuration":
             self.users_data[parts[2]]["Configuration"] = body
@@ -75,6 +78,10 @@ class Tests(unittest.TestCase):
         self.assertEqual(first["OrderedViews"], ["playlist-u1"])
         self.assertEqual(first["LatestItemsExcludes"], ["playlist-u1"])
         self.assertEqual(second["OrderedViews"], ["playlist-u2"])
+
+    def test_user_view_lookup_explicitly_includes_hidden_views(self):
+        mapping = FakeJellyfin().view_id_map("u1")
+        self.assertEqual(mapping[jhm.SPECIAL_PLAYLISTS_ID], "playlist-u1")
 
     def test_update_and_read_back(self):
         jf = FakeJellyfin(); config = dict(jf.user("u1")["Configuration"]); config["OrderedViews"] = ["a", "b"]

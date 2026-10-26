@@ -7,7 +7,7 @@ A small, standalone admin UI for managing the Jellyfin home-library layout for e
 - Discovers configured libraries from `GET /Library/VirtualFolders` and merges Jellyfin's automatic Playlists view from user views. Because Jellyfin assigns Playlists a different ID for each user, the template shows one logical Playlists entry and resolves the correct real ID separately for every user during preview and apply.
 - Refreshes safely and reports renamed, new, and removed libraries. Existing order and toggles are retained; new libraries are appended and enabled by default.
 - Provides drag-and-drop ordering and independent **My Media** / **Latest** visibility for each library.
-- Reads each user's accessible views from `GET /Users/{id}/Views`, then removes inaccessible libraries from that user's generated layout while preserving the master order.
+- Reads each user's views from `GET /Users/{id}/Views?includeHidden=true`, so hidden automatic views can be enabled again, then removes genuinely inaccessible libraries from that user's generated layout while preserving the master order.
 - Lets you edit a master set of native Jellyfin user preferences.
 - Previews the effective library order for every active user.
 - Before apply, writes a complete timestamped user backup. After every update it reads the user back from Jellyfin and verifies all managed fields.

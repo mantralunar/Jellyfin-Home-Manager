@@ -131,7 +131,9 @@ class Jellyfin:
         return result
 
     def user_views(self, user_id: str) -> list[dict]:
-        payload = self.request("GET", f"/Users/{urllib.parse.quote(user_id)}/Views") or {}
+        # includeHidden is essential for managing a view after it has been
+        # excluded from the user's Home screen. Jellyfin Web uses the same flag.
+        payload = self.request("GET", f"/Users/{urllib.parse.quote(user_id)}/Views?includeHidden=true") or {}
         return payload.get("Items", [])
 
     def accessible_views(self, user_id: str) -> set[str]:
@@ -231,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
                 merged.append({**prev, "name": lib["name"]})
             for lib in discovered:
                 if lib["id"] not in old:
-                    changes["new"].append(lib); merged.append({**lib, "myMedia": True, "latest": True})
+                    changes["new"].append(lib); merged.append({**lib, "myMedia": True, "latest": lib["id"] != SPECIAL_PLAYLISTS_ID})
             changes["removed"] = [x for x in old.values() if x["id"] not in ids]
             local["master"] = {"libraries": merged, "settings": local.get("master", {}).get("settings", {})}; local["lastDiscovery"] = utcnow(); atomic_json(CONFIG_FILE, local)
             return self.send_json(200, {"master": local["master"], "libraries": discovered, "changes": changes, "lastDiscovery": local["lastDiscovery"]})
