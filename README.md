@@ -18,13 +18,17 @@ Disabled users are skipped. The application never stores the Jellyfin API key in
 ## Jellyfin setup
 
 1. In Jellyfin Dashboard, create an API key under **Advanced → API Keys**. The key must belong to an administrator context capable of listing and updating users.
-2. Copy `.env.example` to `.env` and set `JELLYFIN_URL` and `JELLYFIN_API_KEY`.
+2. Export `JELLYFIN_URL` and `JELLYFIN_API_KEY` in the shell or service environment that starts the container.
 3. If Jellyfin uses a private CA, mount the CA into the container and configure the Python trust store. `JELLYFIN_VERIFY_TLS=false` is available for testing but is not recommended.
 
 ## Rootless Podman deployment
 
 ```sh
-cp .env.example .env
+export JELLYFIN_URL=http://jellyfin.example:8096
+export JELLYFIN_API_KEY=replace-with-an-admin-api-key
+export JELLYFIN_VERIFY_TLS=true
+export JHM_PORT=8080
+
 mkdir -p data
 podman unshare chown 10001:10001 data
 podman compose up -d --build
@@ -54,7 +58,9 @@ podman run -d --name jellyfin-home-manager \
   --user 10001:10001 \
   --cap-drop=all \
   --security-opt=no-new-privileges \
-  --env-file .env \
+  -e JELLYFIN_URL \
+  -e JELLYFIN_API_KEY \
+  -e JELLYFIN_VERIFY_TLS \
   -p 127.0.0.1:8080:8080 \
   -v ./data:/data:Z \
   ghcr.io/OWNER/REPOSITORY:latest
