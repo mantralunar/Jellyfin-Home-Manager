@@ -66,7 +66,7 @@ def load_local() -> dict:
 class Jellyfin:
     def __init__(self):
         self.base = os.environ.get("JELLYFIN_URL", "").rstrip("/")
-        self.token = os.environ.get("JELLYFIN_API_KEY", "")
+        self.token = os.environ.get("JELLYFIN_API_KEY", "").strip()
         self.timeout = float(os.environ.get("JELLYFIN_TIMEOUT", "15"))
         self.verify_tls = os.environ.get("JELLYFIN_VERIFY_TLS", "true").lower() not in ("0", "false", "no")
         if not self.base or not self.token:
@@ -76,7 +76,11 @@ class Jellyfin:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(
             self.base + path, data=data, method=method,
-            headers={"X-Emby-Token": self.token, "Accept": "application/json", "Content-Type": "application/json"},
+            headers={
+                "Authorization": self.authorization_header(),
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
         )
         context = None if self.verify_tls else ssl._create_unverified_context()
         try:
@@ -88,6 +92,15 @@ class Jellyfin:
             raise ApiError(502, f"Jellyfin returned HTTP {exc.code}: {detail or exc.reason}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise ApiError(502, f"Cannot reach Jellyfin: {exc.reason if hasattr(exc, 'reason') else exc}") from exc
+
+    def authorization_header(self) -> str:
+        # Jellyfin 12 rejects the legacy X-Emby-Token header by default.
+        safe_token = self.token.replace("\\", "\\\\").replace('"', '\\"')
+        return (
+            'MediaBrowser Client="Jellyfin Home Manager", Device="Server", '
+            'DeviceId="jellyfin-home-manager", Version="1.0.0", '
+            f'Token="{safe_token}"'
+        )
 
     def users(self) -> list[dict]:
         return self.request("GET", "/Users") or []

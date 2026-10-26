@@ -86,7 +86,7 @@ Backups are JSON files in `data/backups/`. They contain Jellyfin user records an
 - `GET /Users/{id}/Views`
 - `POST /Users/{id}/Configuration`
 
-Requests authenticate with `X-Emby-Token`.
+Requests authenticate with the current Jellyfin `Authorization: MediaBrowser Token="…"` scheme. This works with Jellyfin 12, where legacy `X-Emby-Token` authentication is disabled by default.
 
 ## Run without a container
 

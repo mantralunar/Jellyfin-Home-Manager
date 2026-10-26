@@ -38,6 +38,14 @@ class Tests(unittest.TestCase):
             {"id": "b", "name": "Shows", "collectionType": "tvshows"},
         ])
 
+    def test_current_jellyfin_authorization_header(self):
+        jf = FakeJellyfin()
+        jf.token = "abc123"
+        header = jf.authorization_header()
+        self.assertTrue(header.startswith('MediaBrowser '))
+        self.assertIn('Token="abc123"', header)
+        self.assertNotIn("X-Emby-Token", header)
+
     def test_access_filter_preserves_master_order_and_toggles(self):
         master = {"libraries": [
             {"id": "a", "name": "Films", "myMedia": True, "latest": False},
