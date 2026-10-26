@@ -7,6 +7,7 @@ A small, standalone admin UI for managing the Jellyfin home-library layout for e
 - Discovers configured libraries from `GET /Library/VirtualFolders` and merges Jellyfin's automatic Playlists view from user views. Because Jellyfin assigns Playlists a different ID for each user, the template shows one logical Playlists entry and resolves the correct real ID separately for every user during preview and apply.
 - Refreshes safely and reports renamed, new, and removed libraries. Existing order and toggles are retained; new libraries are appended and enabled by default.
 - Provides drag-and-drop ordering and independent **My Media** / **Latest** visibility for each library.
+- Shows live per-library user access in dropdowns and stages access changes using Jellyfin's `EnableAllFolders` and `EnabledFolders` policy fields.
 - Reads each user's views from `GET /Users/{id}/Views?includeHidden=true`, so hidden automatic views can be enabled again, then removes genuinely inaccessible libraries from that user's generated layout while preserving the master order.
 - Lets you edit a master set of native Jellyfin user preferences.
 - Previews the effective library order for every active user.
@@ -72,9 +73,10 @@ GitHub packages inherit repository visibility by default. For a private package,
 
 1. Select **Refresh libraries** to reconcile the saved template with live Jellyfin data.
 2. Drag libraries into order and choose which appear in **My Media** and **Latest**.
-3. Adjust the master settings and save the template.
-4. Select **Preview apply to all**. Each preview is already filtered to that user's accessible views.
-5. Apply. The result reports each user's read-back verification and the backup filename.
+3. Open a configured library's **Access** dropdown to review the live user list and stage any permission changes. Removing one library from an “all libraries” user converts that account to an explicit allowlist.
+4. Adjust the master settings and save the template.
+5. Select **Preview apply to all**. Each preview shows access changes and the resulting per-user Home screen.
+6. Apply. Access policies are applied first, followed by Home settings; both are read back for verification.
 
 Backups are JSON files in `data/backups/`. They contain Jellyfin user records and should be treated as sensitive. To restore, use the saved `Configuration` object with Jellyfin's `POST /Users/{id}/Configuration` endpoint after reviewing it.
 
@@ -85,6 +87,7 @@ Backups are JSON files in `data/backups/`. They contain Jellyfin user records an
 - `GET /Users/{id}`
 - `GET /Users/{id}/Views`
 - `POST /Users/{id}/Configuration`
+- `POST /Users/{id}/Policy`
 
 Requests authenticate with the current Jellyfin `Authorization: MediaBrowser Token="…"` scheme. This works with Jellyfin 12, where legacy `X-Emby-Token` authentication is disabled by default.
 

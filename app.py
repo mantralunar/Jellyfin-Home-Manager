@@ -156,6 +156,9 @@ class Jellyfin:
     def update_configuration(self, user_id: str, config: dict) -> None:
         self.request("POST", f"/Users/{urllib.parse.quote(user_id)}/Configuration", config)
 
+    def update_policy(self, user_id: str, policy: dict) -> None:
+        self.request("POST", f"/Users/{urllib.parse.quote(user_id)}/Policy", policy)
+
 
 def validate_master(value: dict) -> dict:
     if not isinstance(value, dict):
@@ -187,6 +190,68 @@ def desired_config(current: dict, master: dict, accessible: set[str] | dict[str,
 
 def relevant(config: dict) -> dict:
     return {k: config.get(k) for k in (*CONFIG_KEYS, "OrderedViews", "MyMediaExcludes", "LatestItemsExcludes") if k in config}
+
+
+def current_access(policy: dict, library_ids: list[str]) -> tuple[str, list[str]]:
+    if policy.get("EnableAllFolders", True):
+        return "all", list(library_ids)
+    enabled = set(policy.get("EnabledFolders") or [])
+    return "selected", [item_id for item_id in library_ids if item_id in enabled]
+
+
+def users_payload(users: list[dict], library_ids: list[str]) -> list[dict]:
+    result = []
+    for user in users:
+        policy = user.get("Policy") or {}
+        mode, selected = current_access(policy, library_ids)
+        result.append({
+            "id": user["Id"], "name": user.get("Name", user["Id"]),
+            "disabled": bool(policy.get("IsDisabled")),
+            "administrator": bool(policy.get("IsAdministrator")),
+            "accessMode": mode, "libraryIds": selected,
+        })
+    return result
+
+
+def validate_access(value, users: list[dict], library_ids: list[str]) -> dict[str, dict]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ApiError(400, "access must be an object")
+    valid_users, valid_libraries = {u.get("Id") for u in users}, set(library_ids)
+    cleaned = {}
+    for user_id, spec in value.items():
+        if user_id not in valid_users or not isinstance(spec, dict):
+            raise ApiError(400, "Access contains an unknown user")
+        mode = spec.get("mode")
+        if mode not in ("all", "selected"):
+            raise ApiError(400, "Access mode must be all or selected")
+        selected = spec.get("libraryIds", [])
+        if not isinstance(selected, list) or any(x not in valid_libraries for x in selected):
+            raise ApiError(400, "Access contains an unknown library")
+        cleaned[user_id] = {"mode": mode, "libraryIds": [x for x in library_ids if x in set(selected)]}
+    return cleaned
+
+
+def desired_policy(current: dict, spec: dict | None, library_ids: list[str]) -> tuple[dict, list[str]]:
+    policy = dict(current.get("Policy") or {})
+    if not spec:
+        _, effective = current_access(policy, library_ids)
+        return policy, effective
+    if spec["mode"] == "all":
+        policy["EnableAllFolders"] = True
+        policy["EnabledFolders"] = []
+        return policy, list(library_ids)
+    policy["EnableAllFolders"] = False
+    policy["EnabledFolders"] = list(spec["libraryIds"])
+    return policy, list(spec["libraryIds"])
+
+
+def relevant_policy(policy: dict) -> dict:
+    return {
+        "EnableAllFolders": bool(policy.get("EnableAllFolders", True)),
+        "EnabledFolders": sorted(policy.get("EnabledFolders") or []),
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -221,9 +286,10 @@ class Handler(BaseHTTPRequestHandler):
         jf = Jellyfin()
         if self.command == "GET" and self.path == "/api/state":
             local = load_local(); users = jf.users(); libraries = jf.libraries(users)
-            return self.send_json(200, {**local, "users": [{"id": u["Id"], "name": u.get("Name", u["Id"]), "disabled": bool((u.get("Policy") or {}).get("IsDisabled"))} for u in users], "libraries": libraries})
+            library_ids = [x["id"] for x in libraries if x["id"] != SPECIAL_PLAYLISTS_ID]
+            return self.send_json(200, {**local, "users": users_payload(users, library_ids), "libraries": libraries})
         if self.command == "POST" and self.path == "/api/refresh":
-            local = load_local(); old = {x["id"]: x for x in local.get("master", {}).get("libraries", [])}; discovered = jf.libraries(jf.users())
+            local = load_local(); users = jf.users(); old = {x["id"]: x for x in local.get("master", {}).get("libraries", [])}; discovered = jf.libraries(users)
             ids = {x["id"] for x in discovered}; live = {x["id"]: x for x in discovered}; changes = {"new": [], "renamed": [], "removed": []}; merged = []
             # Retain the operator's saved order, update names in place, then append new libraries.
             for prev in local.get("master", {}).get("libraries", []):
@@ -236,28 +302,50 @@ class Handler(BaseHTTPRequestHandler):
                     changes["new"].append(lib); merged.append({**lib, "myMedia": True, "latest": lib["id"] != SPECIAL_PLAYLISTS_ID})
             changes["removed"] = [x for x in old.values() if x["id"] not in ids]
             local["master"] = {"libraries": merged, "settings": local.get("master", {}).get("settings", {})}; local["lastDiscovery"] = utcnow(); atomic_json(CONFIG_FILE, local)
-            return self.send_json(200, {"master": local["master"], "libraries": discovered, "changes": changes, "lastDiscovery": local["lastDiscovery"]})
+            library_ids = [x["id"] for x in discovered if x["id"] != SPECIAL_PLAYLISTS_ID]
+            return self.send_json(200, {"master": local["master"], "libraries": discovered, "users": users_payload(users, library_ids), "changes": changes, "lastDiscovery": local["lastDiscovery"]})
         if self.command == "PUT" and self.path == "/api/master":
             master = validate_master(self.body().get("master")); local = load_local(); local["master"] = master; atomic_json(CONFIG_FILE, local); return self.send_json(200, {"master": master})
         if self.command == "POST" and self.path == "/api/preview":
-            master = validate_master(self.body().get("master")); previews = []
-            for user in jf.users():
+            body = self.body(); master = validate_master(body.get("master")); previews = []; users = jf.users()
+            library_ids = [x["id"] for x in jf.libraries(users) if x["id"] != SPECIAL_PLAYLISTS_ID]
+            access = validate_access(body.get("access"), users, library_ids)
+            library_names = {x["id"]: x["name"] for x in master["libraries"]}
+            for user in users:
                 if (user.get("Policy") or {}).get("IsDisabled"): continue
-                uid = user["Id"]; current = user if "Configuration" in user else jf.user(uid); desired, rows = desired_config(current, master, jf.view_id_map(uid))
-                previews.append({"id": uid, "name": user.get("Name", uid), "libraries": rows, "before": relevant(current.get("Configuration") or {}), "after": relevant(desired)})
+                uid = user["Id"]; current = user if "Configuration" in user else jf.user(uid)
+                before_ids = set(current_access(current.get("Policy") or {}, library_ids)[1])
+                policy, effective_ids = desired_policy(current, access.get(uid), library_ids)
+                view_map = jf.view_id_map(uid); view_map.update({x: x for x in effective_ids})
+                desired, rows = desired_config(current, master, view_map)
+                after_ids = set(effective_ids); access_changes = []
+                for item_id in library_ids:
+                    if (item_id in before_ids) != (item_id in after_ids):
+                        access_changes.append({"id": item_id, "name": library_names.get(item_id, item_id), "before": item_id in before_ids, "after": item_id in after_ids})
+                previews.append({"id": uid, "name": user.get("Name", uid), "libraries": rows, "accessChanges": access_changes, "before": relevant(current.get("Configuration") or {}), "after": relevant(desired), "policyAfter": relevant_policy(policy)})
             return self.send_json(200, {"users": previews})
         if self.command == "POST" and self.path == "/api/apply":
-            master = validate_master(self.body().get("master")); local = load_local(); local["master"] = master; atomic_json(CONFIG_FILE, local)
+            body = self.body(); master = validate_master(body.get("master")); local = load_local(); local["master"] = master; atomic_json(CONFIG_FILE, local)
+            users = jf.users(); library_ids = [x["id"] for x in jf.libraries(users) if x["id"] != SPECIAL_PLAYLISTS_ID]
+            access = validate_access(body.get("access"), users, library_ids)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"); backup = {"createdAt": utcnow(), "server": jf.base, "users": []}; plan = []
-            for user in jf.users():
+            for user in users:
                 if (user.get("Policy") or {}).get("IsDisabled"): continue
-                uid = user["Id"]; full = jf.user(uid); backup["users"].append(full); desired, _ = desired_config(full, master, jf.view_id_map(uid)); plan.append((uid, user.get("Name", uid), desired))
+                uid = user["Id"]; full = jf.user(uid); backup["users"].append(full)
+                policy, effective_ids = desired_policy(full, access.get(uid), library_ids)
+                plan.append((uid, user.get("Name", uid), policy, effective_ids, full))
             backup_path = BACKUP_DIR / f"users-{stamp}-{secrets.token_hex(3)}.json"; atomic_json(backup_path, backup)
             results = []
-            for uid, name, desired in plan:
+            for uid, name, policy, effective_ids, full in plan:
                 try:
+                    if uid in access: jf.update_policy(uid, policy)
+                    policy_actual = (jf.user(uid).get("Policy") or {})
+                    policy_expected_rel = relevant_policy(policy); policy_actual_rel = relevant_policy(policy_actual)
+                    view_map = jf.view_id_map(uid); view_map.update({x: x for x in effective_ids})
+                    desired, _ = desired_config(full, master, view_map)
                     jf.update_configuration(uid, desired); actual = (jf.user(uid).get("Configuration") or {}); expected_rel = relevant(desired); actual_rel = relevant(actual)
-                    results.append({"id": uid, "name": name, "ok": actual_rel == expected_rel, "expected": expected_rel, "actual": actual_rel})
+                    policy_ok = uid not in access or policy_actual_rel == policy_expected_rel
+                    results.append({"id": uid, "name": name, "ok": policy_ok and actual_rel == expected_rel, "expected": expected_rel, "actual": actual_rel, "policyExpected": policy_expected_rel, "policyActual": policy_actual_rel})
                 except ApiError as exc: results.append({"id": uid, "name": name, "ok": False, "error": exc.message})
             ok = all(x["ok"] for x in results)
             return self.send_json(200 if ok else 207, {"ok": ok, "backup": backup_path.name, "results": results})

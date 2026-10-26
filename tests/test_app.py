@@ -14,8 +14,8 @@ class FakeJellyfin(jhm.Jellyfin):
     def __init__(self):
         self.base = "http://mock-jellyfin"
         self.users_data = {
-        "u1": {"Id": "u1", "Name": "Alice", "Policy": {}, "Configuration": {"OrderedViews": ["b", "a"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
-        "u2": {"Id": "u2", "Name": "Bob", "Policy": {}, "Configuration": {"OrderedViews": ["b"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
+        "u1": {"Id": "u1", "Name": "Alice", "Policy": {"EnableAllFolders": True, "EnabledFolders": []}, "Configuration": {"OrderedViews": ["b", "a"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
+        "u2": {"Id": "u2", "Name": "Bob", "Policy": {"EnableAllFolders": False, "EnabledFolders": ["b"]}, "Configuration": {"OrderedViews": ["b"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
         }
         self.views_data = {
             "u1": [{"Id": "a", "Name": "Films", "CollectionType": "movies"}, {"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "playlist-u1", "Name": "Playlists", "CollectionType": "playlists"}],
@@ -33,6 +33,9 @@ class FakeJellyfin(jhm.Jellyfin):
         if method == "GET" and len(parts) == 3: return self.users_data[parts[2]]
         if method == "POST" and len(parts) == 4 and parts[3] == "Configuration":
             self.users_data[parts[2]]["Configuration"] = body
+            return None
+        if method == "POST" and len(parts) == 4 and parts[3] == "Policy":
+            self.users_data[parts[2]]["Policy"] = body
             return None
         raise AssertionError((method, path))
 
@@ -87,6 +90,29 @@ class Tests(unittest.TestCase):
         jf = FakeJellyfin(); config = dict(jf.user("u1")["Configuration"]); config["OrderedViews"] = ["a", "b"]
         jf.update_configuration("u1", config)
         self.assertEqual(jf.user("u1")["Configuration"]["OrderedViews"], ["a", "b"])
+
+    def test_live_access_state_distinguishes_all_and_selected(self):
+        users = jhm.users_payload(FakeJellyfin().users(), ["a", "b"])
+        self.assertEqual(users[0]["accessMode"], "all")
+        self.assertEqual(users[0]["libraryIds"], ["a", "b"])
+        self.assertEqual(users[1]["accessMode"], "selected")
+        self.assertEqual(users[1]["libraryIds"], ["b"])
+
+    def test_selected_access_updates_only_folder_policy_fields(self):
+        current = FakeJellyfin().user("u1")
+        policy, effective = jhm.desired_policy(current, {"mode": "selected", "libraryIds": ["a"]}, ["a", "b"])
+        self.assertFalse(policy["EnableAllFolders"])
+        self.assertEqual(policy["EnabledFolders"], ["a"])
+        self.assertEqual(effective, ["a"])
+
+    def test_access_validation_rejects_unknown_library(self):
+        with self.assertRaises(jhm.ApiError):
+            jhm.validate_access({"u1": {"mode": "selected", "libraryIds": ["missing"]}}, FakeJellyfin().users(), ["a", "b"])
+
+    def test_policy_update_and_read_back(self):
+        jf = FakeJellyfin(); policy = dict(jf.user("u2")["Policy"]); policy["EnabledFolders"] = ["a", "b"]
+        jf.update_policy("u2", policy)
+        self.assertEqual(jf.user("u2")["Policy"]["EnabledFolders"], ["a", "b"])
 
     def test_master_validation_rejects_duplicate_ids(self):
         with self.assertRaises(jhm.ApiError):
