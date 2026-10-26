@@ -18,8 +18,8 @@ class FakeJellyfin(jhm.Jellyfin):
         "u2": {"Id": "u2", "Name": "Bob", "Policy": {}, "Configuration": {"OrderedViews": ["b"], "LatestItemsExcludes": [], "MyMediaExcludes": []}},
         }
         self.views_data = {
-            "u1": [{"Id": "a", "Name": "Films", "CollectionType": "movies"}, {"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "p", "Name": "Playlists", "CollectionType": "playlists"}],
-            "u2": [{"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "p", "Name": "Playlists", "CollectionType": "playlists"}],
+            "u1": [{"Id": "a", "Name": "Films", "CollectionType": "movies"}, {"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "playlist-u1", "Name": "Playlists", "CollectionType": "playlists"}],
+            "u2": [{"Id": "b", "Name": "Shows", "CollectionType": "tvshows"}, {"Id": "playlist-u2", "Name": "Playlists", "CollectionType": "playlists"}],
         }
 
     def request(self, method, path, body=None):
@@ -39,7 +39,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(FakeJellyfin().libraries(), [
             {"id": "a", "name": "Films", "collectionType": "movies"},
             {"id": "b", "name": "Shows", "collectionType": "tvshows"},
-            {"id": "p", "name": "Playlists", "collectionType": "playlists"},
+            {"id": jhm.SPECIAL_PLAYLISTS_ID, "name": "Playlists", "collectionType": "playlists"},
         ])
 
     def test_current_jellyfin_authorization_header(self):
@@ -64,8 +64,17 @@ class Tests(unittest.TestCase):
 
     def test_automatic_playlists_view_is_deduplicated_across_users(self):
         libraries = FakeJellyfin().libraries()
-        self.assertEqual([x["id"] for x in libraries].count("p"), 1)
-        self.assertEqual(next(x for x in libraries if x["id"] == "p")["name"], "Playlists")
+        self.assertEqual([x["id"] for x in libraries].count(jhm.SPECIAL_PLAYLISTS_ID), 1)
+        self.assertEqual(next(x for x in libraries if x["id"] == jhm.SPECIAL_PLAYLISTS_ID)["name"], "Playlists")
+
+    def test_logical_playlists_id_maps_to_each_users_real_id(self):
+        jf = FakeJellyfin()
+        master = {"libraries": [{"id": jhm.SPECIAL_PLAYLISTS_ID, "name": "Playlists", "myMedia": True, "latest": False}], "settings": {}}
+        first, _ = jhm.desired_config(jf.user("u1"), master, jf.view_id_map("u1"))
+        second, _ = jhm.desired_config(jf.user("u2"), master, jf.view_id_map("u2"))
+        self.assertEqual(first["OrderedViews"], ["playlist-u1"])
+        self.assertEqual(first["LatestItemsExcludes"], ["playlist-u1"])
+        self.assertEqual(second["OrderedViews"], ["playlist-u2"])
 
     def test_update_and_read_back(self):
         jf = FakeJellyfin(); config = dict(jf.user("u1")["Configuration"]); config["OrderedViews"] = ["a", "b"]

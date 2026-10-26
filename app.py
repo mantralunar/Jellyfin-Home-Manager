@@ -25,6 +25,7 @@ DATA_DIR = Path(os.environ.get("JHM_DATA_DIR", APP_DIR / "data"))
 CONFIG_FILE = DATA_DIR / "config.json"
 BACKUP_DIR = DATA_DIR / "backups"
 MAX_BODY = 1_000_000
+SPECIAL_PLAYLISTS_ID = "special:playlists"
 CONFIG_KEYS = (
     "AudioLanguagePreference", "PlayDefaultAudioTrack", "SubtitleLanguagePreference",
     "DisplayMissingEpisodes", "GroupedFolders", "SubtitleMode", "DisplayCollectionsView",
@@ -114,17 +115,19 @@ class Jellyfin:
             if item_id:
                 result.append({"id": item_id, "name": folder.get("Name") or item_id, "collectionType": folder.get("CollectionType") or ""})
                 seen.add(item_id)
-        # System-created views such as Playlists are not virtual folders. Discover
-        # them from user views and merge their real server IDs into the template.
+        # Playlists is a system-created view, not a virtual folder. Its raw ID is
+        # user-specific, so expose one logical template entry and translate it
+        # back to each user's real ID when generating their configuration.
+        playlists_name = None
         for user in users if users is not None else self.users():
             if (user.get("Policy") or {}).get("IsDisabled") or not user.get("Id"):
                 continue
             for view in self.user_views(user["Id"]):
-                item_id = view.get("Id")
                 collection_type = str(view.get("CollectionType") or "").lower()
-                if item_id and item_id not in seen and collection_type == "playlists":
-                    result.append({"id": item_id, "name": view.get("Name") or "Playlists", "collectionType": "playlists"})
-                    seen.add(item_id)
+                if view.get("Id") and collection_type == "playlists" and playlists_name is None:
+                    playlists_name = view.get("Name") or "Playlists"
+        if playlists_name:
+            result.append({"id": SPECIAL_PLAYLISTS_ID, "name": playlists_name, "collectionType": "playlists"})
         return result
 
     def user_views(self, user_id: str) -> list[dict]:
@@ -133,6 +136,17 @@ class Jellyfin:
 
     def accessible_views(self, user_id: str) -> set[str]:
         return {x.get("Id") for x in self.user_views(user_id) if x.get("Id")}
+
+    def view_id_map(self, user_id: str) -> dict[str, str]:
+        mapping = {}
+        for view in self.user_views(user_id):
+            item_id = view.get("Id")
+            if not item_id:
+                continue
+            mapping[item_id] = item_id
+            if str(view.get("CollectionType") or "").lower() == "playlists":
+                mapping[SPECIAL_PLAYLISTS_ID] = item_id
+        return mapping
 
     def user(self, user_id: str) -> dict:
         return self.request("GET", f"/Users/{urllib.parse.quote(user_id)}") or {}
@@ -157,13 +171,15 @@ def validate_master(value: dict) -> dict:
     return {"libraries": cleaned, "settings": {k: settings[k] for k in CONFIG_KEYS if k in settings}}
 
 
-def desired_config(current: dict, master: dict, accessible: set[str]) -> tuple[dict, list[dict]]:
+def desired_config(current: dict, master: dict, accessible: set[str] | dict[str, str]) -> tuple[dict, list[dict]]:
     config = dict(current.get("Configuration") or {})
-    rows = [row for row in master["libraries"] if row["id"] in accessible]
+    view_ids = accessible if isinstance(accessible, dict) else {item_id: item_id for item_id in accessible}
+    rows = [row for row in master["libraries"] if row["id"] in view_ids]
+    actual_ids = {row["id"]: view_ids[row["id"]] for row in rows}
     config.update(master["settings"])
-    config["OrderedViews"] = [row["id"] for row in rows]
-    config["MyMediaExcludes"] = [row["id"] for row in rows if not row["myMedia"]]
-    config["LatestItemsExcludes"] = [row["id"] for row in rows if not row["latest"]]
+    config["OrderedViews"] = [actual_ids[row["id"]] for row in rows]
+    config["MyMediaExcludes"] = [actual_ids[row["id"]] for row in rows if not row["myMedia"]]
+    config["LatestItemsExcludes"] = [actual_ids[row["id"]] for row in rows if not row["latest"]]
     return config, rows
 
 
@@ -225,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
             master = validate_master(self.body().get("master")); previews = []
             for user in jf.users():
                 if (user.get("Policy") or {}).get("IsDisabled"): continue
-                uid = user["Id"]; current = user if "Configuration" in user else jf.user(uid); desired, rows = desired_config(current, master, jf.accessible_views(uid))
+                uid = user["Id"]; current = user if "Configuration" in user else jf.user(uid); desired, rows = desired_config(current, master, jf.view_id_map(uid))
                 previews.append({"id": uid, "name": user.get("Name", uid), "libraries": rows, "before": relevant(current.get("Configuration") or {}), "after": relevant(desired)})
             return self.send_json(200, {"users": previews})
         if self.command == "POST" and self.path == "/api/apply":
@@ -233,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"); backup = {"createdAt": utcnow(), "server": jf.base, "users": []}; plan = []
             for user in jf.users():
                 if (user.get("Policy") or {}).get("IsDisabled"): continue
-                uid = user["Id"]; full = jf.user(uid); backup["users"].append(full); desired, _ = desired_config(full, master, jf.accessible_views(uid)); plan.append((uid, user.get("Name", uid), desired))
+                uid = user["Id"]; full = jf.user(uid); backup["users"].append(full); desired, _ = desired_config(full, master, jf.view_id_map(uid)); plan.append((uid, user.get("Name", uid), desired))
             backup_path = BACKUP_DIR / f"users-{stamp}-{secrets.token_hex(3)}.json"; atomic_json(backup_path, backup)
             results = []
             for uid, name, desired in plan:
